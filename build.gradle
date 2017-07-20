@@ -1,0 +1,158 @@
+/*
+ * Copyright 2017 ThoughtWorks, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import java.security.MessageDigest
+
+plugins {
+  id 'co.riiid.gradle' version '0.4.2'
+}
+
+def gitRevision = { ->
+  def hashStdOut = new ByteArrayOutputStream()
+  exec {
+    commandLine "git", "log", "-n", "1", "--format=%H"
+    standardOutput = hashStdOut
+  }
+
+  return hashStdOut.toString().trim()
+}
+
+def releaseRevision = { ->
+  def hashStdOut = new ByteArrayOutputStream()
+  exec {
+    commandLine "git", "log", "--pretty=format:"
+    standardOutput = hashStdOut
+  }
+
+  return hashStdOut.size().toString()
+}
+
+def PLUGIN_VERSION = '2.0.2'
+def DIST_VERSION = releaseRevision()
+def GIT_REVISION = gitRevision()
+
+allprojects {
+  project.ext.distVersion = DIST_VERSION
+  project.ext.fullVersion = DIST_VERSION ? "${PLUGIN_VERSION}-${DIST_VERSION}" : PLUGIN_VERSION
+  project.ext.gitRevision = GIT_REVISION
+  project.ext.pluginDesc = [
+    id         : 'yum',
+    version    : PLUGIN_VERSION,
+    goCdVersion: '15.2.0',
+    name       : 'Yum Plugin',
+    description: 'Plugin that polls a yum repository',
+    vendorName : 'ThoughtWorks Go Team',
+    vendorUrl  : 'https://www.thoughtworks.com'
+  ]
+
+  group = 'cd.go'
+  version = project.fullVersion
+}
+
+subprojects {
+  apply plugin: 'java'
+  sourceCompatibility = 1.8
+  targetCompatibility = 1.8
+
+  repositories {
+    jcenter()
+    mavenLocal()
+  }
+
+  tasks.withType(Jar) {
+    finalizedBy 'checksumJar'
+    preserveFileTimestamps = false
+    reproducibleFileOrder = true
+
+    manifest {
+      attributes(
+        'Go-Version': project.pluginDesc.goCdVersion,
+        'Plugin-Revision': project.pluginDesc.version,
+        'Implementation-Title': project.name,
+        'Implementation-Version': project.version,
+        'Source-Compatibility': project.sourceCompatibility,
+        'Target-Compatibility': project.targetCompatibility,
+        'Git-SHA': GIT_REVISION
+      )
+    }
+  }
+
+  tasks.withType(JavaCompile) { compileTask ->
+    options.encoding = "UTF-8"
+  }
+
+  tasks.withType(Test) {
+    outputs.upToDateWhen { false }
+    testLogging {
+      showStandardStreams = project.path != ':server'
+
+      exceptionFormat 'full'
+
+      beforeSuite { suite ->
+        if (suite.parent) {
+          logger.quiet("Running ${suite.name}")
+        }
+      }
+
+      afterSuite { suite, result ->
+        if (suite.parent) {
+          logger.quiet("Tests run: ${result.testCount}, Failures: ${result.failedTestCount}, Skipped: ${result.skippedTestCount}, Time elapsed: ${(result.endTime - result.startTime) / 1000.00} sec")
+          if (result.resultType == TestResult.ResultType.FAILURE) {
+            logger.quiet("Test ${suite.name} FAILED")
+          }
+        } else {
+          logger.quiet("Total tests run: ${result.testCount}, Failures: ${result.failedTestCount}, Skipped: ${result.skippedTestCount}, Time elapsed: ${(result.endTime - result.startTime) / 1000.00} sec")
+        }
+      }
+    }
+  }
+
+  task checksumJar {
+    def md5 = project.file("${jar.archivePath}.MD5")
+    def sha1 = project.file("${jar.archivePath}.SHA1")
+    def sha256 = project.file("${jar.archivePath}.SHA256")
+
+    inputs.files(jar.archivePath)
+    outputs.files(md5)
+    outputs.files(sha1)
+    outputs.files(sha256)
+    doFirst {
+      md5.write("${checksum(jar.archivePath, 'MD5')}  ${jar.archivePath.name}\n")
+      sha1.write("${checksum(jar.archivePath, 'SHA-1')}  ${jar.archivePath.name}\n")
+      sha256.write("${checksum(jar.archivePath, 'SHA-256')}  ${jar.archivePath.name}\n")
+    }
+  }
+}
+
+github {
+  owner = System.getenv('GITHUB_USER') ?: 'bob'
+  repo = 'gocd-yum-repository-poller-plugin'
+  token = System.getenv('GITHUB_TOKEN') ?: 'bad-token'
+  tagName = PLUGIN_VERSION
+  targetCommitish = project.gitRevision
+  body = """
+      # Version ${fullVersion}
+      See release notes at https://github.com/${github.owner}/${github.repo}/blob/master/CHANGELOG.md#${github.tagName}
+    """.stripIndent()
+}
+
+static def checksum(File file, String algorithm) {
+  def digester = MessageDigest.getInstance(algorithm)
+  file.eachByte(8192) { bfr, num ->
+    digester.update(bfr, 0, num)
+  }
+  return digester.digest().encodeHex()
+}
